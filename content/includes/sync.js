@@ -318,39 +318,32 @@ var sync = {
         // We ned to intercept any throw error, because lightning needs a few operations after sync finished
         try {
             switch (syncData.type) {
-                case "Contacts":
-                    await eas.sync.easFolder(syncData);
-                    // If the account is configured to use Microsoft Graph, use the Graph contacts sync
-                    // otherwise fall back to existing EAS sync.
-                    try {
-                        const useGraph = syncData.accountData.getAccountProperty("graph.enabled");
-                        if (useGraph === "true" || useGraph === true) {
-                            if (eas && eas.sync && typeof eas.sync.contactsGraphSync !== "undefined") {
-                                await eas.sync.contactsGraphSync.syncContacts(syncData);
-                                break;
-                            } else {
-                                // Graph modules not loaded; fall back to EAS
-                                console.log("graph enabled but contactsGraphSync not available; falling back to EAS");
-                            }
-                        }
-                    } catch (e) {
-                        console.error("Error checking graph.enabled flag:", e);
-                    }
-                    await eas.sync.easFolder(syncData);
-                    break;
-
-                case "Calendar":
-                case "Tasks":
-                    //save current value of readOnly (or take it from the setting)
-                    lightningReadOnly = syncData.target.calendar.getProperty("readOnly") || syncData.currentFolderData.getFolderProperty("downloadonly");
-                    syncData.target.calendar.setProperty("readOnly", false);
-
-                    lightningBatch = true;
-                    syncData.target.calendar.startBatch();
-
-                    await eas.sync.easFolder(syncData);
-                    break;
-            }
+		    case "Contacts":
+		        try {
+		            const useGraph = syncData.accountData.getAccountProperty("graph.enabled");
+		            if (useGraph === "true" || useGraph === true) {
+		                if (eas && eas.sync && eas.sync.contactsGraphSync) {
+		                    await eas.sync.contactsGraphSync.syncContacts(syncData);
+		                    break;
+		                }
+		            }
+		        } catch (e) { console.error("graph.enabled check failed", e); }
+		        await eas.sync.easFolder(syncData);
+		        break;
+		    case "Calendar":
+		    case "Tasks":
+		        try {
+		            const useGraph = syncData.accountData.getAccountProperty("graph.enabled");
+		            if (useGraph === "true" || useGraph === true) {
+		                if (eas && eas.sync && eas.sync.calendarsGraphSync) {
+		                    // For Calendar, run Graph calendar sync (this will enumerate calendars and delta each)
+		                    await eas.sync.calendarsGraphSync.syncCalendars(syncData);
+		                    break;
+		                }
+		            }
+		        } catch (e) { console.error("graph.enabled check failed", e); }
+		        await eas.sync.easFolder(syncData);
+		        break;            }
         } catch (report) {
             error = report;
         }

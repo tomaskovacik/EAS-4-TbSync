@@ -27,8 +27,6 @@ const eas = TbSync.providers.eas;
 
 eas.prefs = Services.prefs.getBranch("extensions.eas4tbsync.");
 
-// Load Microsoft Graph integration modules and attach to eas namespace.
-// These are optional and will be used when an account is configured to use Graph.
 try {
   var { graphClient } = ChromeUtils.importESModule(
     `chrome://tbsync/content/includes/graphClient.sys.mjs?${tbsyncExtension.manifest.version}`
@@ -39,16 +37,30 @@ try {
   var { contactsGraphSync } = ChromeUtils.importESModule(
     `chrome://tbsync/content/includes/contactsGraphSync.sys.mjs?${tbsyncExtension.manifest.version}`
   );
+  var { calendarsGraphSync } = ChromeUtils.importESModule(
+    `chrome://tbsync/content/includes/calendarsGraphSync.sys.mjs?${tbsyncExtension.manifest.version}`
+  );
+  var { contactAdapter } = ChromeUtils.importESModule(
+    `chrome://tbsync/content/includes/contactAdapter.sys.mjs?${tbsyncExtension.manifest.version}`
+  );
 
   if (graphClient) eas.graphClient = graphClient;
   if (graphMappings) eas.graphMappings = graphMappings;
   if (contactsGraphSync) {
-    // Ensure eas.sync exists
     if (!eas.sync) eas.sync = {};
     eas.sync.contactsGraphSync = contactsGraphSync;
   }
+  if (calendarsGraphSync) {
+    if (!eas.sync) eas.sync = {};
+    eas.sync.calendarsGraphSync = calendarsGraphSync;
+  }
+  if (contactAdapter) {
+    // attach adapter helpers
+    if (!eas.sync) eas.sync = {};
+    eas.sync.applyRemoteContact = contactAdapter.applyRemoteContact;
+    eas.sync.applyRemoteEvent = contactAdapter.applyRemoteEvent;
+  }
 } catch (e) {
-  // Non-fatal: Graph modules simply not present / load failed
   console.log("Graph modules not loaded:", e);
 }
 
