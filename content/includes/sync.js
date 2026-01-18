@@ -320,6 +320,23 @@ var sync = {
             switch (syncData.type) {
                 case "Contacts":
                     await eas.sync.easFolder(syncData);
+                    // If the account is configured to use Microsoft Graph, use the Graph contacts sync
+                    // otherwise fall back to existing EAS sync.
+                    try {
+                        const useGraph = syncData.accountData.getAccountProperty("graph.enabled");
+                        if (useGraph === "true" || useGraph === true) {
+                            if (eas && eas.sync && typeof eas.sync.contactsGraphSync !== "undefined") {
+                                await eas.sync.contactsGraphSync.syncContacts(syncData);
+                                break;
+                            } else {
+                                // Graph modules not loaded; fall back to EAS
+                                console.log("graph enabled but contactsGraphSync not available; falling back to EAS");
+                            }
+                        }
+                    } catch (e) {
+                        console.error("Error checking graph.enabled flag:", e);
+                    }
+                    await eas.sync.easFolder(syncData);
                     break;
 
                 case "Calendar":

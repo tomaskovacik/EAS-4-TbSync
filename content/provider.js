@@ -27,6 +27,31 @@ const eas = TbSync.providers.eas;
 
 eas.prefs = Services.prefs.getBranch("extensions.eas4tbsync.");
 
+// Load Microsoft Graph integration modules and attach to eas namespace.
+// These are optional and will be used when an account is configured to use Graph.
+try {
+  var { graphClient } = ChromeUtils.importESModule(
+    `chrome://tbsync/content/includes/graphClient.sys.mjs?${tbsyncExtension.manifest.version}`
+  );
+  var { graphMappings } = ChromeUtils.importESModule(
+    `chrome://tbsync/content/includes/graphMappings.sys.mjs?${tbsyncExtension.manifest.version}`
+  );
+  var { contactsGraphSync } = ChromeUtils.importESModule(
+    `chrome://tbsync/content/includes/contactsGraphSync.sys.mjs?${tbsyncExtension.manifest.version}`
+  );
+
+  if (graphClient) eas.graphClient = graphClient;
+  if (graphMappings) eas.graphMappings = graphMappings;
+  if (contactsGraphSync) {
+    // Ensure eas.sync exists
+    if (!eas.sync) eas.sync = {};
+    eas.sync.contactsGraphSync = contactsGraphSync;
+  }
+} catch (e) {
+  // Non-fatal: Graph modules simply not present / load failed
+  console.log("Graph modules not loaded:", e);
+}
+
 //use flags instead of strings to avoid errors due to spelling errors
 eas.flags = Object.freeze({
     allowEmptyResponse: true,
