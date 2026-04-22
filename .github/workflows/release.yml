@@ -20,19 +20,17 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Create ZIP
+      - name: Create XPI
         run: |
-          zip -r release.zip api _locales manifest.json background.js LICENSE CONTRIBUTORS.md README.md
-
-      - name: Rename ZIP to .xpi
-        run: |
-          mv release.zip release.xpi
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          zip -r "EAS-4-TbSync-${VERSION}.xpi" api _locales manifest.json background.js LICENSE CONTRIBUTORS.md README.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           tag: ${{ github.ref }}
-          files: release.xpi
+          files: EAS-4-TbSync-*.xpi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
