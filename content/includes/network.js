@@ -648,12 +648,12 @@ var network = {
     },
 
     //returns false on parse error and null on empty response (if allowed)
-    getDataFromResponse: function (wbxml, allowEmptyResponse = !eas.flags.allowEmptyResponse, syncData = null) {
+    getDataFromResponse: function (wbxml, allowEmptyResponse = false, syncData = null) {
         //check for empty wbxml
         if (wbxml.length === 0) {
             if (allowEmptyResponse) return null;
-            // An empty response likely means the current AS version is not supported by the server.
-            // Reset version info to force re-detection on the next sync attempt.
+            // An unexpected empty response may indicate a server-side issue (e.g. unsupported AS version).
+            // Reset version info as a defensive measure to force re-detection on the next sync attempt.
             if (syncData) {
                 syncData.accountData.resetAccountProperty("asversion");
                 syncData.accountData.resetAccountProperty("lastEasOptionsUpdate");
@@ -672,8 +672,8 @@ var network = {
         let wbxmlData = eas.xmltools.getDataFromXMLString(xml);
         if (wbxmlData === null) {
             if (allowEmptyResponse) return null;
-            // An empty/no-data response likely means the current AS version is not supported by the server.
-            // Reset version info to force re-detection on the next sync attempt.
+            // A response with no data may indicate a server-side issue (e.g. unsupported AS version).
+            // Reset version info as a defensive measure to force re-detection on the next sync attempt.
             if (syncData) {
                 syncData.accountData.resetAccountProperty("asversion");
                 syncData.accountData.resetAccountProperty("lastEasOptionsUpdate");
@@ -803,6 +803,11 @@ var network = {
                      *                     throw eas.sync.finish("resyncAccount", statusType, "Request:\n" + syncData.request + "\n\nResponse:\n" + syncData.response);
                      */
                 }
+
+            case "138": // InvalidProtocolVersion - the AS version used is not supported; retry with re-detected version
+                syncData.accountData.resetAccountProperty("asversion");
+                syncData.accountData.resetAccountProperty("lastEasOptionsUpdate");
+                throw eas.sync.finish("resyncAccount", "global." + status);
 
             case "141": // The device is not provisionable
             case "142": // DeviceNotProvisioned
