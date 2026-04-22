@@ -648,11 +648,18 @@ var network = {
     },
 
     //returns false on parse error and null on empty response (if allowed)
-    getDataFromResponse: function (wbxml, allowEmptyResponse = !eas.flags.allowEmptyResponse) {
+    getDataFromResponse: function (wbxml, allowEmptyResponse = false, syncData = null) {
         //check for empty wbxml
         if (wbxml.length === 0) {
             if (allowEmptyResponse) return null;
-            else throw eas.sync.finish("warning", "empty-response");
+            // An unexpected empty response may indicate a server-side issue (e.g. unsupported AS version).
+            // Reset version info as a defensive measure to force re-detection on the next sync attempt.
+            if (syncData) {
+                syncData.accountData.resetAccountProperty("asversion");
+                syncData.accountData.resetAccountProperty("lastEasOptionsUpdate");
+                throw eas.sync.finish("resyncAccount", "empty-response");
+            }
+            throw eas.sync.finish("warning", "empty-response");
         }
 
         //convert to save xml (all special chars in user data encoded by encodeURIComponent) and check for parse errors
@@ -665,7 +672,14 @@ var network = {
         let wbxmlData = eas.xmltools.getDataFromXMLString(xml);
         if (wbxmlData === null) {
             if (allowEmptyResponse) return null;
-            else throw eas.sync.finish("warning", "response-contains-no-data");
+            // A response with no data may indicate a server-side issue (e.g. unsupported AS version).
+            // Reset version info as a defensive measure to force re-detection on the next sync attempt.
+            if (syncData) {
+                syncData.accountData.resetAccountProperty("asversion");
+                syncData.accountData.resetAccountProperty("lastEasOptionsUpdate");
+                throw eas.sync.finish("resyncAccount", "response-contains-no-data");
+            }
+            throw eas.sync.finish("warning", "response-contains-no-data");
         }
 
         //debug
@@ -790,6 +804,11 @@ var network = {
                      */
                 }
 
+            case "138": // InvalidProtocolVersion - the AS version used is not supported; retry with re-detected version
+                syncData.accountData.resetAccountProperty("asversion");
+                syncData.accountData.resetAccountProperty("lastEasOptionsUpdate");
+                throw eas.sync.finish("resyncAccount", "global." + status);
+
             case "141": // The device is not provisionable
             case "142": // DeviceNotProvisioned
             case "143": // PolicyRefresh
@@ -841,7 +860,7 @@ var network = {
         let response = await eas.network.sendRequest(wbxml.getBytes(), "Settings", syncData);
 
         syncData.setSyncState("eval.response.setdeviceinfo");
-        let wbxmlData = eas.network.getDataFromResponse(response);
+        let wbxmlData = eas.network.getDataFromResponse(response, !eas.flags.allowEmptyResponse, syncData);
 
         eas.network.checkStatus(syncData, wbxmlData, "Settings.Status");
     },
@@ -864,7 +883,7 @@ var network = {
             let response = await eas.network.sendRequest(wbxml.getBytes(), "Provision", syncData);
 
             syncData.setSyncState("eval.response.provision");
-            let wbxmlData = eas.network.getDataFromResponse(response);
+            let wbxmlData = eas.network.getDataFromResponse(response, !eas.flags.allowEmptyResponse, syncData);
             let policyStatus = eas.xmltools.getWbxmlDataField(wbxmlData, "Provision.Policies.Policy.Status");
             let provisionStatus = eas.xmltools.getWbxmlDataField(wbxmlData, "Provision.Status");
             if (provisionStatus === false) {
@@ -936,7 +955,7 @@ var network = {
 
         syncData.setSyncState("eval.response.synckey");
         // get data from wbxml response
-        let wbxmlData = eas.network.getDataFromResponse(response);
+        let wbxmlData = eas.network.getDataFromResponse(response, !eas.flags.allowEmptyResponse, syncData);
         //check status
         eas.network.checkStatus(syncData, wbxmlData, "Sync.Collections.Collection.Status");
         //update synckey
@@ -1025,7 +1044,7 @@ var network = {
 
 
         syncData.setSyncState("eval.response.getuserinfo");
-        let wbxmlData = eas.network.getDataFromResponse(response);
+        let wbxmlData = eas.network.getDataFromResponse(response, !eas.flags.allowEmptyResponse, syncData);
 
         eas.network.checkStatus(syncData, wbxmlData, "Settings.Status");
     },
