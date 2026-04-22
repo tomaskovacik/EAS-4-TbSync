@@ -134,7 +134,7 @@ var sync = {
         let response = await eas.network.sendRequest(wbxml.getBytes(), "FolderSync", syncData);
 
         syncData.setSyncState("eval.response.folders");
-        let wbxmlData = eas.network.getDataFromResponse(response);
+        let wbxmlData = eas.network.getDataFromResponse(response, !eas.flags.allowEmptyResponse, syncData);
         eas.network.checkStatus(syncData, wbxmlData, "FolderSync.Status");
 
         let synckey = eas.xmltools.getWbxmlDataField(wbxmlData, "FolderSync.SyncKey");
@@ -253,7 +253,7 @@ var sync = {
         let response = await eas.network.sendRequest(wbxml.getBytes(), "FolderDelete", syncData);
 
         syncData.setSyncState("eval.response.deletefolder");
-        let wbxmlData = eas.network.getDataFromResponse(response);
+        let wbxmlData = eas.network.getDataFromResponse(response, !eas.flags.allowEmptyResponse, syncData);
 
         eas.network.checkStatus(syncData, wbxmlData, "FolderDelete.Status");
 
@@ -642,7 +642,7 @@ var sync = {
                 syncData.setSyncState("eval.response.localchanges");
 
                 //get data from wbxml response
-                let wbxmlData = eas.network.getDataFromResponse(response);
+                let wbxmlData = eas.network.getDataFromResponse(response, !eas.flags.allowEmptyResponse, syncData);
 
                 //check status and manually handle error states which support softfails
                 let errorcause = eas.network.checkStatus(syncData, wbxmlData, "Sync.Collections.Collection.Status", "", true);
