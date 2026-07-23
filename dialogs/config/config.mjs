@@ -133,6 +133,23 @@ async function load() {
     $("oauth-identity").textContent = account.authenticatedUserEmail;
   }
 
+  // "Sign in again": re-runs the same consent flow setup.html uses, then
+  // saves the fresh refreshToken onto this *existing* account instead of
+  // creating a new one. Covers both a normal reauth (revoked/expired
+  // token) and an account stuck without a refreshToken at all (e.g. one
+  // that never got one from a botched legacy migration - shows up as
+  // "OAuth auth not primed" on every sync attempt since primeAuth()
+  // silently no-ops without a token to cache).
+  if (
+    !readOnly &&
+    (accountType === TYPE_OFFICE365 || accountType === TYPE_PERSONAL_MS)
+  ) {
+    $("oauth-reauth-row").hidden = false;
+    $("btn-oauth-reauth").addEventListener("click", () =>
+      onReauth(accountType, account),
+    );
+  }
+
   // ── Connection section ─────────────────────────────────────────────────
   // Visible for custom EAS and auto-detect accounts. For auto-detect, the
   // server and user came from the Autodiscover response and stay readonly;
@@ -235,6 +252,48 @@ function applyReadOnly() {
   cancelBtn.textContent = readOnly
     ? i18n("config.close", "Close")
     : i18n("config.cancel", "Cancel");
+}
+
+async function onReauth(accountType, account) {
+  clearError();
+  const btn = $("btn-oauth-reauth");
+  btn.disabled = true;
+  try {
+    const authReply = await browser.runtime.sendMessage({
+      type: "eas.startOAuth",
+      loginHint: account.authenticatedUserEmail || account.user || "",
+      servertype: accountType,
+    });
+    if (!authReply?.ok) {
+      if (authReply?.code === "E:CANCELLED") return;
+      throw new Error(
+        authReply?.error ??
+          i18n("setup.oauth.error.signInFailed", "Sign-in failed"),
+      );
+    }
+    const tokens = authReply.result;
+    const saveReply = await browser.runtime.sendMessage({
+      type: "eas.saveAccount",
+      accountId,
+      patch: {
+        refreshToken: tokens.refreshToken,
+        authenticatedUserEmail: tokens.authenticatedUserEmail,
+      },
+    });
+    if (!saveReply?.ok) {
+      throw new Error(
+        saveReply?.error ?? i18n("config.error.saveFailed", "Save failed"),
+      );
+    }
+    if (tokens.authenticatedUserEmail) {
+      $("oauth-identity-row").hidden = false;
+      $("oauth-identity").textContent = tokens.authenticatedUserEmail;
+    }
+  } catch (err) {
+    showError(err.message ?? String(err));
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function onSave() {

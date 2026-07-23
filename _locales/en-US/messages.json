@@ -194,6 +194,9 @@
   "config.account.signedInAs": {
     "message": "Signed in as"
   },
+  "config.account.reauth": {
+    "message": "Sign in again…"
+  },
   "config.protocol.asVersion": {
     "message": "ActiveSync version"
   },

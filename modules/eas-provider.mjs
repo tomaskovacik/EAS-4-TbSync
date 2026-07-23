@@ -931,6 +931,16 @@ export class EasProvider extends TbSyncProviderImplementation {
     if ("password" in patch && patch.password) {
       customPatch.password = patch.password;
     }
+    // OAuth "sign in again" (config.html's reauth button): a fresh
+    // refreshToken from a new consent round-trip. Mirrors `password`
+    // above - only written when actually provided, never blanked out by
+    // an unrelated save.
+    if ("refreshToken" in patch && patch.refreshToken) {
+      customPatch.refreshToken = patch.refreshToken;
+    }
+    if ("authenticatedUserEmail" in patch && patch.authenticatedUserEmail) {
+      customPatch.authenticatedUserEmail = patch.authenticatedUserEmail;
+    }
 
     if ("asVersionSelected" in patch) {
       const v = String(patch.asVersionSelected ?? "");
@@ -1002,9 +1012,53 @@ export class EasProvider extends TbSyncProviderImplementation {
     const rv = await this.getAccount(accountId);
     if (!rv?.account) return null;
     return {
-      account: rv.account,
+      account: await this.#repairMissingOAuthServer(rv.account),
       folders: rv.folders ?? [],
     };
+  }
+
+  /** Self-heal `custom.server` for OAuth accounts (office365/personal-ms)
+   *  that somehow ended up without one - the URL is fully determined by
+   *  `servertype` (HOST_BY_SERVERTYPE), the same formula
+   *  `createAccountFromSetup` uses for a fresh account, so this can only
+   *  ever be a no-op or a correct fix, never a wrong one.
+   *
+   *  Exists because `upgrades.mjs`'s one-shot migration queue only fires
+   *  on an in-place *update* (`runtime.onInstalled` with `previousVersion`
+   *  set) - a full remove-then-reinstall gets `reason: "install"` and
+   *  skips it entirely, per that module's own doc comment. An account
+   *  whose `custom.server` gap predates whatever migration should have
+   *  set it - or one whose synckey history means that migration was
+   *  never reached - would otherwise stay broken forever, surfacing as
+   *  `easOptions: account.custom.server is missing` on every sync
+   *  attempt. Runs on every `#loadContext` call (i.e. before any sync),
+   *  so it heals the account before the caller can hit that error, and
+   *  is cheap/idempotent after the first successful patch. */
+  async #repairMissingOAuthServer(account) {
+    if (account.custom?.server) return account;
+    const servertype = account.custom?.servertype;
+    const host = HOST_BY_SERVERTYPE[servertype];
+    if (!host) return account;
+    const server = `https://${host}/Microsoft-Server-ActiveSync`;
+    try {
+      await this.updateAccount({
+        accountId: account.accountId,
+        patch: { custom: { server } },
+      });
+    } catch (err) {
+      this.reportEventLog({
+        level: "warning",
+        accountId: account.accountId,
+        message: `[eas] failed to repair missing custom.server: ${err?.message ?? String(err)}`,
+      });
+      return account;
+    }
+    this.reportEventLog({
+      level: "warning",
+      accountId: account.accountId,
+      message: `[eas] repaired missing custom.server for OAuth account (servertype="${servertype}") -> "${server}"`,
+    });
+    return { ...account, custom: { ...account.custom, server } };
   }
 
   async #getFolder(accountId, folderId) {
