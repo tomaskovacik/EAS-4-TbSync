@@ -402,6 +402,9 @@
       }
     }
   },
+  "eas.oauth.error.notSignedIn": {
+    "message": "Not signed in - sign in via this account's Settings."
+  },
   "eas.network.error.transport": {
     "message": "EAS transport error (HTTP $STATUS$)",
     "placeholders": {

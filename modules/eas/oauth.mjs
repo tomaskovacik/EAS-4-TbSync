@@ -217,7 +217,10 @@ export async function getAccessToken(accountId) {
   const auth = authCache.get(accountId);
   if (!auth) {
     throw withCode(
-      new Error("OAuth auth not primed - call primeAuth first"),
+      new Error(
+        browser.i18n.getMessage("eas.oauth.error.notSignedIn") ||
+          "Not signed in - sign in via this account's Settings.",
+      ),
       ERR.AUTH,
     );
   }
