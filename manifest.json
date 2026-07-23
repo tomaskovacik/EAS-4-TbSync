@@ -5,7 +5,7 @@
       "id": "eas4tbsync@jobisoft.de",
       "update_url": "https://raw.githubusercontent.com/jobisoft/tbsync/refs/heads/Main/updates.json",
       "strict_min_version": "140.0",
-      "strict_max_version": "151.*"
+      "strict_max_version": "153.*"
     }
   },
   "name": "__MSG_extensionName__",
