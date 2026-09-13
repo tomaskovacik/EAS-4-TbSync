@@ -314,3 +314,71 @@ def t_11_6(s):
     ok("items.remove", id=_event_body(s, "alarm-ack renamed")["id"])
     s.sync()
     harness.eq(s.changelog("events"), [], "changelog drained after cleanup")
+
+
+@test("11.7", "a reminder answered stays answered across a resync (TbSync #816)")
+def t_11_7(s):
+    """The other half of 11.6. `<Reminder>` in the server's answer is its
+    authority over the alarm, so the merge rebuilds the VALARM - and used to
+    drop the user's dismissal with it. Exchange re-sends that element
+    whenever anything else about the meeting changes, so an organiser moving
+    a room resurrected every attendee's dismissed reminder.
+
+    Driven by a resync rather than a real server-side edit, because that is
+    the same code: an inbound <Add> for an item we already hold by ServerId
+    is routed into `applyChangeFromAd` with the prior blob, so the merge runs
+    exactly as it would on a Change. Nothing else in the suite can make a
+    server send a Change carrying an unchanged Reminder on demand.
+    """
+    ok(
+        "items.create",
+        type="event",
+        ical=probes.event(
+            "ack-resync",
+            lines=[
+                "DTSTART:20260916T110000Z",
+                "DTEND:20260916T113000Z",
+                "BEGIN:VALARM",
+                "ACTION:DISPLAY",
+                "TRIGGER:-PT15M",
+                "DESCRIPTION:Reminder",
+                "END:VALARM",
+            ],
+        ),
+    )
+    s.sync()
+    harness.eq(s.changelog("events"), [], "changelog drained before the test")
+
+    # Answer the reminder, the way a dismissal reaches the item. 11.6 proves
+    # this is not queued, so the server never hears about it - which is
+    # exactly why the local copy is the only place it exists.
+    item = _event_body(s, "ack-resync")
+    ok(
+        "items.update",
+        id=item["id"],
+        ical=item["item"].replace(
+            "END:VALARM", "END:VALARM\r\nX-MOZ-LASTACK:20260916T104500Z"
+        ),
+    )
+    harness.true(
+        "X-MOZ-LASTACK" in _event_body(s, "ack-resync")["item"],
+        "the dismissal did not reach the stored item",
+    )
+
+    # A sync key nobody issued: the server refuses it and re-sends the folder,
+    # each item as an <Add> that finds its existing twin. Written straight
+    # into host storage the way 19.2 does - there is no verb for this.
+    snap = ok("storage.snapshot")
+    folders = snap["tbsync.folders"]
+    folders[s.account_id][s.folders["events"]]["custom"]["synckey"] = "999999999"
+    ok("storage.restore", data={"tbsync.folders": folders})
+    s.sync()
+
+    harness.true(
+        "X-MOZ-LASTACK" in _event_body(s, "ack-resync")["item"],
+        "the resync cleared the dismissal - the reminder will ring again",
+    )
+
+    ok("items.remove", id=_event_body(s, "ack-resync")["id"])
+    s.sync()
+    harness.eq(s.changelog("events"), [], "changelog drained after cleanup")

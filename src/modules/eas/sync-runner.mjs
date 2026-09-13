@@ -52,6 +52,7 @@ import {
   isReceivedMeeting,
   plainCopyOfInvitation,
   sameAnnounceable,
+  preserveAlarmAck,
   preserveSelfPartstat,
   repliedPartstatOf,
   stampRepliedPartstat,
@@ -3247,6 +3248,12 @@ async function applyChangeFromAd(
       priorIcal: existing.blob,
       userEmail: accountUserAddress(ctx.account),
     });
+    // Same shape, different local state: a <Reminder> in the answer makes
+    // the merge rebuild the alarm, and the user's snooze or dismissal of it
+    // would go with the alarm it answered. Kept when the alarm came back
+    // unchanged, which is every Change provoked by something else about the
+    // meeting.
+    blob = preserveAlarmAck({ builtIcal: blob, priorIcal: existing.blob });
   }
   await ctx.queue.markServerWrite({
     parentId: ctx.targetID,

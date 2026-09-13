@@ -2260,6 +2260,98 @@ export function preserveSelfPartstat({ builtIcal, priorIcal, userEmail }) {
   return touched ? vcal.toString() : builtIcal;
 }
 
+/** How Thunderbird records that a reminder was answered: `X-MOZ-LASTACK`
+ *  for both a snooze and a dismiss, and `X-MOZ-SNOOZE-TIME` beside it to say
+ *  when to return - suffixed with the recurrence id when one occurrence was
+ *  snoozed, hence the prefix rather than an exact name. Local throughout:
+ *  ActiveSync carries neither. */
+const ALARM_ANSWER = /^x-moz-(lastack|snooze-time)/i;
+
+/** The alarms of one component, as the only thing that distinguishes them
+ *  here: when each fires, and how many there are.
+ *
+ *  `TRIGGER` is compared as it stands rather than converted back to EAS
+ *  minutes. `alarmMinutes` would do the conversion, but it exists for the
+ *  outbound path and logs about alarms it has to rewrite - explanations a
+ *  pull has no business producing. */
+function alarmTriggers(comp) {
+  return comp
+    .getAllSubcomponents("valarm")
+    .map((alarm) => {
+      const trig = alarm.getFirstProperty("trigger");
+      return trig ? canonicalPropertyString(trig) : "";
+    })
+    .sort();
+}
+
+/** Whether an alarm the user has already answered is still the same alarm.
+ *
+ *  Both sides are ours - the server sends one offset and the previous sync
+ *  wrote it the same way - so equal strings mean equal alarms, and a set
+ *  that grew or shrank is a change whatever the offsets say. */
+function sameAlarms(a, b) {
+  return a.length === b.length && a.every((t, i) => t === b[i]);
+}
+
+/**
+ * Carry a snoozed or dismissed reminder across a merge that did not change
+ * the reminder.
+ *
+ * `<Reminder>` in the ApplicationData is the server's authority over the
+ * alarm, so the merge clears the VALARMs before re-adding it - otherwise a
+ * partial Change stacks a second alarm on the item. The user's answer to
+ * that alarm was being cleared with them, and the server re-sends the
+ * element whenever anything else about the meeting changes, so an organiser
+ * moving a room resurrected every attendee's dismissed reminder. Thunderbird
+ * reads a missing `X-MOZ-LASTACK` as "not answered" and fires again.
+ *
+ * The answer is two properties that mean one thing. `X-MOZ-LASTACK` says the
+ * alarm was answered and suppresses it, `X-MOZ-SNOOZE-TIME` only adds when
+ * to come back - Thunderbird writes the first for a snooze *and* a dismiss.
+ * Carrying one without the other would leave a snoozed alarm with its
+ * suppression gone, firing at once instead of at the snooze time, so they
+ * move together or not at all.
+ *
+ * Only when the alarm is unchanged. A reminder the organiser moved is one
+ * the user has not seen, and it should ring.
+ *
+ * Per component, because an alarm answered on a single occurrence is
+ * recorded on that override and nowhere else.
+ */
+export function preserveAlarmAck({ builtIcal, priorIcal }) {
+  const priorCal = parseVCalendar(priorIcal);
+  if (!priorCal) return builtIcal;
+
+  const keep = new Map();
+  for (const comp of priorCal.getAllSubcomponents("vevent")) {
+    const marks = comp
+      .getAllProperties()
+      .filter((p) => ALARM_ANSWER.test(p.name));
+    if (!marks.length) continue;
+    const ridValue = comp.getFirstPropertyValue("recurrence-id");
+    keep.set(ridValue ? instanceKey(ridValue) : null, {
+      triggers: alarmTriggers(comp),
+      marks: marks.map((p) => [p.name, p.getFirstValue()]),
+    });
+  }
+  if (!keep.size) return builtIcal;
+
+  const vcal = parseVCalendar(builtIcal);
+  if (!vcal) return builtIcal;
+  let touched = false;
+  for (const comp of vcal.getAllSubcomponents("vevent")) {
+    const ridValue = comp.getFirstPropertyValue("recurrence-id");
+    const prior = keep.get(ridValue ? instanceKey(ridValue) : null);
+    if (!prior) continue;
+    if (!sameAlarms(prior.triggers, alarmTriggers(comp))) continue;
+    for (const [name, value] of prior.marks) {
+      comp.updatePropertyWithValue(name, value);
+      touched = true;
+    }
+  }
+  return touched ? vcal.toString() : builtIcal;
+}
+
 /** What an override *is*, with how it happens to be written taken out.
  *
  *  The digest decides whether an occurrence still matches what the server
