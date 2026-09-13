@@ -201,6 +201,21 @@ async function record(
     });
     return;
   }
+  // A reminder being snoozed or dismissed reaches us as an ordinary edit,
+  // because that is how Thunderbird stores the answer. Queueing it would
+  // push a change the wire cannot express, and a server that schedules for
+  // us would mail every attendee to say so. Nothing below this line should
+  // happen for it: no queue entry, no pending count, no sync armed.
+  if (op === "updated" && onlyAlarmBookkeeping(oldIcal, ical)) {
+    report?.({
+      level: "debug",
+      message:
+        `[${type === "task" ? "task" : "event"}-sync] not queueing ${itemId}: ` +
+        `only the reminder's snoozed/dismissed state changed, which the ` +
+        `server does not keep`,
+    });
+    return;
+  }
   const before = oldIcal ? exceptionFingerprint(oldIcal) : null;
   // One calendar type serves both, so the item says which it is - a task
   // folder's edits must not be queued as events.
@@ -564,6 +579,66 @@ function alsoChanges(ical, priorIcal) {
     console.debug("[eas] could not diff an incoming item:", err);
     return "";
   }
+}
+
+/** Names a write moves without the user having changed anything.
+ *
+ *  `dtstamp` and `last-modified` are rewritten on every save, and
+ *  `x-moz-generation` is Thunderbird's own per-item write counter. They are
+ *  here so the alarm properties can be the only thing left: without them no
+ *  diff is ever confined to the alarm, and the test below never fires.
+ *
+ *  `sequence` and `created` are deliberately absent. Neither moves when an
+ *  alarm is acknowledged, and leaving them out keeps this a statement about
+ *  alarm bookkeeping rather than a general list of what we consider
+ *  uninteresting. */
+const WRITE_BUMPED = new Set(["dtstamp", "last-modified", "x-moz-generation"]);
+
+/** Where Thunderbird keeps the answer to "has this reminder been dealt
+ *  with", both of them per item rather than per alarm. The snooze name
+ *  carries the recurrence id when a single occurrence is snoozed
+ *  (`x-moz-snooze-time-1793558400000000`), so it is matched by prefix. */
+const ALARM_ACK = "x-moz-lastack";
+const ALARM_SNOOZE = "x-moz-snooze-time";
+
+/**
+ * True when the only thing this write changed is whether a reminder has
+ * been snoozed or dismissed.
+ *
+ * Thunderbird stores that in the item - `snoozeAlarm` sets
+ * `X-MOZ-SNOOZE-TIME`, `dismissAlarm` sets `X-MOZ-LASTACK` and clears the
+ * snooze - and then saves it like any other edit, on the *parent*, so
+ * dealing with one occurrence's reminder rewrites the series. Nothing in
+ * the outbound codec carries either property, so pushing such a write tells
+ * the server that something changed while changing nothing, and a server
+ * that does the scheduling mails every attendee about it.
+ *
+ * Answers on names alone, which is enough: whatever the new value is, a
+ * property in this set cannot be a user's edit.
+ *
+ * Deliberately false for anything it cannot read. A false positive here
+ * drops a real edit and the user never learns, so an unparseable item, a
+ * create, a delete and a diff carrying one unexpected name all go to the
+ * queue exactly as before.
+ */
+export function onlyAlarmBookkeeping(oldIcal, ical) {
+  if (!oldIcal || !ical) return false;
+  let names;
+  try {
+    names = differingPropertyNames(oldIcal, ical);
+  } catch {
+    return false;
+  }
+  // `null` is "one of them would not parse", and an empty list is a write
+  // that changed nothing at all - neither is an alarm being acknowledged,
+  // and neither is ours to swallow.
+  if (!names?.length) return false;
+  return names.every(
+    (name) =>
+      name === ALARM_ACK ||
+      name.startsWith(ALARM_SNOOZE) ||
+      WRITE_BUMPED.has(name),
+  );
 }
 
 /** Register the item hooks. Safe to call more than once.

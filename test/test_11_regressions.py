@@ -245,3 +245,72 @@ def t_11_5(s):
     # untidy - the push is answered with HTTP 500 and the folder goes red.
     harness.eq(s.status("events"), "success", "events folder status")
     s.settle("events")
+
+
+@test("11.6", "acknowledging a reminder is not an edit (TbSync #816)")
+def t_11_6(s):
+    """Thunderbird keeps whether a reminder has been snoozed or dismissed
+    inside the item, and saves it through the ordinary write path - on the
+    parent, so dealing with one occurrence's alarm rewrites the series.
+    Queued as a user edit it leaves as a <Change>, and a server that
+    schedules for us then mails every attendee to say the meeting changed.
+
+    Nothing on the wire carries either property, so that <Change> announced
+    a change that was not there. The assertion is therefore the queue and
+    not the server: an item whose only difference is the acknowledgement
+    must not be queued at all.
+
+    The second half is the one that matters most. A filter this close to the
+    user's save is one wrong predicate away from swallowing real edits in
+    silence, so a title change through the same path has to still arrive.
+    """
+    ok(
+        "items.create",
+        type="event",
+        ical=probes.event(
+            "alarm-ack",
+            lines=[
+                "DTSTART:20260916T090000Z",
+                "DTEND:20260916T093000Z",
+                "BEGIN:VALARM",
+                "ACTION:DISPLAY",
+                "TRIGGER:-PT15M",
+                "DESCRIPTION:Reminder",
+                "END:VALARM",
+            ],
+        ),
+    )
+    s.sync()
+    harness.eq(s.changelog("events"), [], "changelog drained before the test")
+
+    # What `dismissAlarm` writes: the acknowledgement, and nothing else.
+    item = _event_body(s, "alarm-ack")
+    dismissed = item["item"].replace(
+        "END:VALARM", "END:VALARM\r\nX-MOZ-LASTACK:20260916T084500Z"
+    )
+    harness.true(dismissed != item["item"], "the fixture did not gain the stamp")
+    ok("items.update", id=item["id"], ical=dismissed)
+    harness.eq(
+        s.changelog("events"),
+        [],
+        "a dismissed reminder was queued as a user edit",
+    )
+
+    # ...and a real edit through the very same path still is.
+    item = _event_body(s, "alarm-ack")
+    ok(
+        "items.update",
+        id=item["id"],
+        ical=item["item"].replace("alarm-ack", "alarm-ack renamed"),
+    )
+    harness.eq(
+        len(s.changelog("events")),
+        1,
+        "a title change was swallowed with the alarm bookkeeping",
+    )
+    s.sync()
+    harness.eq(s.changelog("events"), [], "changelog drained")
+
+    ok("items.remove", id=_event_body(s, "alarm-ack renamed")["id"])
+    s.sync()
+    harness.eq(s.changelog("events"), [], "changelog drained after cleanup")
