@@ -66,6 +66,20 @@
         "script": "experiments/LegacyPrefs/implementation.js"
       }
     },
+    "OAuthLoopback": {
+      "schema": "experiments/OAuthLoopback/schema.json",
+      "parent": {
+        "scopes": [
+          "addon_parent"
+        ],
+        "paths": [
+          [
+            "OAuthLoopback"
+          ]
+        ],
+        "script": "experiments/OAuthLoopback/implementation.js"
+      }
+    },
     "LegacyLoginManager": {
       "schema": "experiments/LegacyLoginManager/schema.json",
       "parent": {

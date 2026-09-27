@@ -26,6 +26,7 @@ installWebextEnv();
 
 const oauth = await import("../../src/modules/eas/oauth.mjs");
 const { startAuth, completeExternalConsent, reopenExternalConsent } = oauth;
+const { ERR } = await import("../../src/vendor/tbsync/provider.mjs");
 
 const T = { timeout: 5000 };
 
@@ -38,7 +39,7 @@ const AUTHORIZE =
  *  Built per test, so nothing carries over. The waiters exist because the
  *  flow is asynchronous in ways a fixed number of microtask turns cannot
  *  be trusted to cover. */
-function installHostEnv({ useExternalBrowser = false } = {}) {
+function installHostEnv({ useExternalBrowser = false, clientID = "" } = {}) {
   const state = { externalUrls: [], windows: [], removed: [], nextId: 1 };
   const removalListeners = new Set();
   const updateListeners = new Set();
@@ -63,6 +64,7 @@ function installHostEnv({ useExternalBrowser = false } = {}) {
         if ("oauth.useExternalBrowser" in out) {
           out["oauth.useExternalBrowser"] = useExternalBrowser;
         }
+        if ("oauth.clientID" in out) out["oauth.clientID"] = clientID;
         return out;
       },
     },
@@ -347,5 +349,138 @@ test(
     assert.deepEqual(seen, [dialog.id]);
     host.closeWindow(dialog.id);
     await assert.rejects(() => signIn);
+  },
+);
+
+// ── Loopback redirect (custom client ID with http://localhost registered) ──
+
+/** The OAuthLoopback experiment: one listener on a fixed port whose
+ *  redirect the test delivers by hand, as the browser would. */
+function installLoopback({ port = 50123 } = {}) {
+  const lb = { port, closed: [], deliver: null, abandon: null };
+  let listening = false;
+  globalThis.browser.OAuthLoopback = {
+    async listen() {
+      listening = true;
+      return port;
+    },
+    waitForRedirect() {
+      return new Promise((resolve, reject) => {
+        lb.deliver = (url) => resolve(url);
+        lb.abandon = () => reject(new Error("Sign-in timed out"));
+      });
+    },
+    async close(p) {
+      if (!listening) return;
+      listening = false;
+      lb.closed.push(p);
+    },
+  };
+  return lb;
+}
+
+const CUSTOM_ID = "11111111-2222-3333-4444-555555555555";
+
+test(
+  "a custom client ID gets the redirect back through the loopback listener",
+  T,
+  async () => {
+    const host = installHostEnv({ useExternalBrowser: true, clientID: CUSTOM_ID });
+    const lb = installLoopback();
+    const exchanges = installTokenEndpoint();
+
+    const signIn = startAuth({ servertype: "office365" });
+    const dialog = await host.windowOpened(1);
+    const authUrl = new URL(await host.externalOpened(1));
+
+    assert.equal(
+      authUrl.searchParams.get("redirect_uri"),
+      `http://localhost:${lb.port}`,
+    );
+    assert.equal(authUrl.searchParams.get("code_challenge_method"), "S256");
+    assert.equal(
+      new URL(dialog.url, "https://example.invalid/").searchParams.get("mode"),
+      "loopback",
+      "the dialog only waits; there is nothing to paste",
+    );
+
+    lb.deliver(
+      `http://localhost:${lb.port}/?code=abc&state=${authUrl.searchParams.get("state")}`,
+    );
+    assert.equal((await signIn).refreshToken, "rt-1");
+
+    const [exchange] = exchanges;
+    assert.equal(exchange.get("redirect_uri"), `http://localhost:${lb.port}`);
+    const { createHash } = await import("node:crypto");
+    assert.equal(
+      createHash("sha256").update(exchange.get("code_verifier")).digest("base64url"),
+      authUrl.searchParams.get("code_challenge"),
+    );
+    assert.deepEqual(lb.closed, [lb.port], "the listener is closed afterwards");
+    assert.ok(host.removed.includes(dialog.id), "the waiting dialog is closed");
+  },
+);
+
+test("the waiting dialog's Cancel ends the sign-in and frees the port", T, async () => {
+  const host = installHostEnv({ useExternalBrowser: true, clientID: CUSTOM_ID });
+  const lb = installLoopback();
+  installTokenEndpoint();
+
+  const signIn = startAuth({ servertype: "office365" });
+  const dialog = await host.windowOpened(1);
+  await host.externalOpened(1);
+
+  host.closeWindow(dialog.id);
+  await assert.rejects(signIn, (e) => e.code === ERR.CANCELLED);
+  assert.deepEqual(lb.closed, [lb.port]);
+});
+
+test("a listener that gives up ends the sign-in as cancelled", T, async () => {
+  const host = installHostEnv({ useExternalBrowser: true, clientID: CUSTOM_ID });
+  const lb = installLoopback();
+  installTokenEndpoint();
+
+  const signIn = startAuth({ servertype: "office365" });
+  await host.windowOpened(1);
+  await host.externalOpened(1);
+
+  lb.abandon();
+  await assert.rejects(signIn, (e) => e.code === ERR.CANCELLED);
+  assert.deepEqual(lb.closed, [lb.port]);
+});
+
+test("a forged state at the listener is refused", T, async () => {
+  const host = installHostEnv({ useExternalBrowser: true, clientID: CUSTOM_ID });
+  const lb = installLoopback();
+  const exchanges = installTokenEndpoint();
+
+  const signIn = startAuth({ servertype: "office365" });
+  await host.windowOpened(1);
+  await host.externalOpened(1);
+
+  lb.deliver(`http://localhost:${lb.port}/?code=abc&state=forged`);
+  await assert.rejects(signIn, (e) => e.code === ERR.AUTH);
+  assert.equal(exchanges.length, 0, "no code was redeemed");
+});
+
+test(
+  "the community client ID keeps the paste route until localhost is registered",
+  T,
+  async () => {
+    const host = installHostEnv({ useExternalBrowser: true });
+    const lb = installLoopback();
+    installTokenEndpoint();
+
+    const { signIn, dialog, token, landedUrl } = await startExternalSignIn(host);
+    assert.equal(
+      new URL(dialog.url, "https://example.invalid/").searchParams.get("mode"),
+      null,
+    );
+    assert.deepEqual(lb.closed, [], "no listener was opened");
+    assert.equal(
+      (await completeExternalConsent({ token, url: landedUrl })).accepted,
+      true,
+    );
+    assert.equal((await signIn).refreshToken, "rt-1");
   },
 );

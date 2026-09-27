@@ -19,7 +19,11 @@ import { localizeDocument } from "../../vendor/i18n/i18n.mjs";
 const $ = (id) => document.getElementById(id);
 const i18n = (key, fallback) => browser.i18n.getMessage(key) || fallback;
 
-const token = new URLSearchParams(location.search).get("token");
+const params = new URLSearchParams(location.search);
+const token = params.get("token");
+/** "loopback": the redirect comes back by itself, so there is nothing to
+ *  paste and the window only offers Reopen and Cancel. */
+const loopback = params.get("mode") === "loopback";
 
 /** One sentence per way the paste can be wrong. `expired` is the odd one:
  *  the sign-in is gone, so there is nothing to try again and the window is
@@ -142,6 +146,11 @@ document.addEventListener("DOMContentLoaded", () => {
     return;
   }
 
+  if (loopback) {
+    for (const id of ["intro", "steps", "paste-field", "btn-continue"]) $(id).hidden = true;
+    $("waiting").hidden = false;
+  }
+
   $("btn-continue").addEventListener("click", submit);
   $("btn-reopen").addEventListener("click", reopen);
   // Cancel tells the background, which closes this window: a content page
@@ -161,5 +170,5 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  $("redirect-url").focus();
+  if (!loopback) $("redirect-url").focus();
 });

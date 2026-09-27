@@ -169,15 +169,16 @@
   </head>
   <body>
     <h2 data-i18n-content="oauthPaste.title"></h2>
-    <p class="hint" data-i18n-content="oauthPaste.intro"></p>
+    <p class="hint" id="intro" data-i18n-content="oauthPaste.intro"></p>
+    <p class="hint" id="waiting" hidden data-i18n-content="oauthPaste.waiting"></p>
 
-    <ol class="steps">
+    <ol class="steps" id="steps">
       <li data-i18n-content="oauthPaste.step.signIn"></li>
       <li data-i18n-content="oauthPaste.step.blankPage"></li>
       <li data-i18n-content="oauthPaste.step.paste"></li>
     </ol>
 
-    <div class="field">
+    <div class="field" id="paste-field">
       <label for="redirect-url" data-i18n-content="oauthPaste.label"></label>
       <textarea
         id="redirect-url"

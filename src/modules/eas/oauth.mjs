@@ -79,6 +79,19 @@ const CUSTOM_OAUTH_CLIENT_ID_STORAGE_KEY = "oauth.clientID";
  */
 const USE_EXTERNAL_BROWSER_STORAGE_KEY = "oauth.useExternalBrowser";
 
+/**
+ * Whether the community client ID has `http://localhost` registered as a
+ * redirect URI in Entra. Until it does, the external route falls back to
+ * the paste dialog for it; a custom client ID is assumed to have it, since
+ * whoever registered it can add the URI.
+ */
+const DEFAULT_CLIENT_HAS_LOOPBACK_REDIRECT = false;
+
+/** How long the loopback listener waits for the browser. The paste dialog
+ *  is up the whole time, so its Cancel is the normal way out; this only
+ *  frees the port for a sign-in nobody is attending to. */
+const LOOPBACK_TIMEOUT_MS = 15 * 60_000;
+
 /** True iff the user asked for the external-browser route. Storage being
  *  unreachable answers "no": the popup is the route that always works, and
  *  an unreadable option is not a reason to demand a paste. */
@@ -229,19 +242,49 @@ export async function startAuth({ loginHint, servertype, onWindowCreated }) {
   const clientID = await getGlobalClientID();
   const scope = scopeForServertype(servertype);
   const state = crypto.randomUUID();
+  const external = await useExternalBrowser();
+  // PKCE (RFC 7636) on the external route: the code passes through another
+  // application - and, when pasted, the clipboard.
+  const codeVerifier = external ? randomUrlToken(64) : null;
+  const loopbackPort =
+    external && (clientID !== DEFAULT_OAUTH_CLIENT_ID ||
+      DEFAULT_CLIENT_HAS_LOOPBACK_REDIRECT)
+      ? await openLoopback()
+      : null;
+  const redirectUri =
+    loopbackPort != null ? `http://localhost:${loopbackPort}` : REDIRECT_URI;
 
-  const authUrl = new URL(AUTH_ENDPOINT);
-  authUrl.searchParams.set("client_id", clientID);
-  authUrl.searchParams.set("redirect_uri", REDIRECT_URI);
-  authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("response_mode", "query");
-  authUrl.searchParams.set("scope", scope);
-  authUrl.searchParams.set("state", state);
-  if (loginHint) authUrl.searchParams.set("login_hint", loginHint);
+  let responseUrl;
+  try {
+    const authUrl = new URL(AUTH_ENDPOINT);
+    authUrl.searchParams.set("client_id", clientID);
+    authUrl.searchParams.set("redirect_uri", redirectUri);
+    authUrl.searchParams.set("response_type", "code");
+    authUrl.searchParams.set("response_mode", "query");
+    authUrl.searchParams.set("scope", scope);
+    authUrl.searchParams.set("state", state);
+    if (loginHint) authUrl.searchParams.set("login_hint", loginHint);
+    if (codeVerifier) {
+      authUrl.searchParams.set("code_challenge_method", "S256");
+      authUrl.searchParams.set(
+        "code_challenge",
+        await pkceChallenge(codeVerifier),
+      );
+    }
 
-  const responseUrl = (await useExternalBrowser())
-    ? await runExternalConsent(authUrl.toString(), state, onWindowCreated)
-    : await runConsentPopup(authUrl.toString(), onWindowCreated);
+    responseUrl = external
+      ? await runExternalConsent(authUrl.toString(), {
+          state,
+          redirectUri,
+          loopbackPort,
+          onWindowCreated,
+        })
+      : await runConsentPopup(authUrl.toString(), onWindowCreated);
+  } finally {
+    if (loopbackPort != null) {
+      Promise.resolve(browser.OAuthLoopback.close(loopbackPort)).catch(() => {});
+    }
+  }
 
   // Parse the redirect URL - Microsoft echoes the code back as a query
   // string on the nativeclient page.
@@ -261,7 +304,13 @@ export async function startAuth({ loginHint, servertype, onWindowCreated }) {
   if (returnedState !== state)
     throw withCode(new Error("OAuth state mismatch (possible CSRF)"), ERR.AUTH);
 
-  const tokens = await exchangeCode({ clientID, code, scope });
+  const tokens = await exchangeCode({
+    clientID,
+    code,
+    scope,
+    redirectUri,
+    codeVerifier,
+  });
   if (!tokens.refresh_token) {
     throw withCode(new Error("No refresh_token in token response"), ERR.AUTH);
   }
@@ -276,14 +325,15 @@ export async function startAuth({ loginHint, servertype, onWindowCreated }) {
 }
 
 /** Exchange the authorization code for tokens. */
-async function exchangeCode({ clientID, code, scope }) {
+async function exchangeCode({ clientID, code, scope, redirectUri, codeVerifier }) {
   const body = new URLSearchParams({
     client_id: clientID,
     grant_type: "authorization_code",
     code,
-    redirect_uri: REDIRECT_URI,
+    redirect_uri: redirectUri,
     scope,
   });
+  if (codeVerifier) body.set("code_verifier", codeVerifier);
   const resp = await fetch(TOKEN_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -490,10 +540,10 @@ async function runConsentPopup(authUrl, onWindowCreated) {
  * page in a foreign application - has to come back by hand: the user
  * copies the address bar into a Thunderbird dialog. Thunderbird's own
  * external flow avoids the paste by listening on a loopback socket and
- * redirecting there instead, which needs `http://localhost` registered on
- * the Azure application; the community client ID this add-on ships is
- * registered for `nativeclient` only, so that door is shut for anyone who
- * cannot register an application of their own.
+ * redirecting there instead (`ExternalRequest` in OAuth2.sys.mjs). With a
+ * client ID that has `http://localhost` registered, so do we: the
+ * OAuthLoopback experiment catches the redirect, the dialog only waits,
+ * and its Cancel and Reopen still work. Without one, the paste it is.
  *
  * The dialog is not trusted to be right, only to be the user's. Whether a
  * pasted URL may end a sign-in is decided here, in the same terms
@@ -508,12 +558,22 @@ const PASTE_DIALOG_PATH = "dialogs/oauth-paste/oauth-paste.html";
  *  over from an abandoned attempt cannot answer for the current one. */
 const pendingExternal = new Map();
 
-async function runExternalConsent(authUrl, state, onWindowCreated) {
+async function runExternalConsent(
+  authUrl,
+  { state, redirectUri, loopbackPort, onWindowCreated },
+) {
   const token = crypto.randomUUID();
   // Registered before the window exists. The dialog can message us the
   // moment it loads, and a handoff we have not recorded yet reads as
   // expired - which would strand a sign-in that is perfectly fine.
-  const entry = { state, authUrl, windowId: null, resolve: null, reject: null };
+  const entry = {
+    state,
+    authUrl,
+    redirectUri,
+    windowId: null,
+    resolve: null,
+    reject: null,
+  };
   pendingExternal.set(token, entry);
 
   let resolveResult;
@@ -554,6 +614,7 @@ async function runExternalConsent(authUrl, state, onWindowCreated) {
   try {
     const url = new URL(browser.runtime.getURL(PASTE_DIALOG_PATH));
     url.searchParams.set("token", token);
+    if (loopbackPort != null) url.searchParams.set("mode", "loopback");
     // The dialog goes up first. It is the only way back from a browser
     // Thunderbird cannot see, so a failure to open it must not leave the
     // user signing in with nowhere to put the result.
@@ -571,6 +632,33 @@ async function runExternalConsent(authUrl, state, onWindowCreated) {
       onWindowCreated?.(dialog.id);
     } catch (err) {
       console.debug("[eas] onWindowCreated callback failed:", err);
+    }
+    if (loopbackPort != null) {
+      // The listener answers the browser itself; the redirect it hands over
+      // is judged exactly like a pasted one.
+      browser.OAuthLoopback.waitForRedirect(
+        loopbackPort,
+        LOOPBACK_TIMEOUT_MS,
+      ).then(
+        async (redirected) => {
+          const verdict = await completeExternalConsent({
+            token,
+            url: redirected,
+          });
+          if (!verdict.accepted && verdict.reason !== "expired") {
+            entry.reject(
+              withCode(
+                new Error(`Unusable sign-in redirect (${verdict.reason})`),
+                ERR.AUTH,
+              ),
+            );
+          }
+        },
+        () =>
+          entry.reject(
+            withCode(new Error("Sign-in not completed"), ERR.CANCELLED),
+          ),
+      );
     }
     await browser.windows.openDefaultBrowser(authUrl);
   } catch (err) {
@@ -609,7 +697,7 @@ export async function completeExternalConsent({ token, url } = {}) {
   } catch {
     return { accepted: false, reason: "notAUrl" };
   }
-  if (!parsed.href.startsWith(REDIRECT_URI)) {
+  if (!parsed.href.startsWith(entry.redirectUri)) {
     return { accepted: false, reason: "notRedirect" };
   }
   if (!parsed.searchParams.get("code") && !parsed.searchParams.get("error")) {
@@ -650,4 +738,38 @@ export async function cancelExternalConsent({ token } = {}) {
   if (!entry) return { accepted: false, reason: "expired" };
   entry.reject(withCode(new Error("Sign-in cancelled"), ERR.CANCELLED));
   return { accepted: true };
+}
+
+// ── Loopback listener + PKCE helpers ──────────────────────────────────────
+
+/** Open the OAuthLoopback listener and return its port, or null when the
+ *  experiment is missing or refuses - the paste dialog then covers it. */
+async function openLoopback() {
+  try {
+    return (await browser.OAuthLoopback?.listen()) ?? null;
+  } catch (err) {
+    console.debug("[eas] loopback listener unavailable, falling back to paste:", err);
+    return null;
+  }
+}
+
+/** URL-safe random string with `bytes` of entropy (43-128 chars per RFC 7636). */
+function randomUrlToken(bytes) {
+  return base64Url(crypto.getRandomValues(new Uint8Array(bytes)));
+}
+
+/** code_challenge = BASE64URL(SHA256(code_verifier)) */
+async function pkceChallenge(verifier) {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(verifier),
+  );
+  return base64Url(new Uint8Array(digest));
+}
+
+function base64Url(bytes) {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }

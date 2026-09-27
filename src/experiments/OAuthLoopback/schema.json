@@ -1,0 +1,45 @@
+[
+  {
+    "namespace": "OAuthLoopback",
+    "functions": [
+      {
+        "name": "listen",
+        "type": "function",
+        "async": true,
+        "description": "Opens a one-shot HTTP listener on the loopback interface and returns its port. The first GET to `/` is taken as the OAuth redirect.",
+        "parameters": []
+      },
+      {
+        "name": "waitForRedirect",
+        "type": "function",
+        "async": true,
+        "description": "Resolves with the full redirect URL (http://localhost:<port>/?code=…) once the browser lands on the listener. Rejects when the listener is closed or the timeout runs out.",
+        "parameters": [
+          {
+            "name": "port",
+            "type": "integer",
+            "description": "Port returned by listen()."
+          },
+          {
+            "name": "timeoutMs",
+            "type": "integer",
+            "description": "How long to wait before giving up."
+          }
+        ]
+      },
+      {
+        "name": "close",
+        "type": "function",
+        "async": true,
+        "description": "Closes the listener, rejecting a pending waitForRedirect(). A no-op for an unknown port.",
+        "parameters": [
+          {
+            "name": "port",
+            "type": "integer",
+            "description": "Port returned by listen()."
+          }
+        ]
+      }
+    ]
+  }
+]
