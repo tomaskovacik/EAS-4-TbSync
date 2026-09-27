@@ -26,6 +26,7 @@ installWebextEnv();
 
 const oauth = await import("../../src/modules/eas/oauth.mjs");
 const { startAuth, completeExternalConsent, reopenExternalConsent } = oauth;
+const { ERR } = await import("../../src/vendor/tbsync/provider.mjs");
 
 const T = { timeout: 5000 };
 
@@ -38,7 +39,7 @@ const AUTHORIZE =
  *  Built per test, so nothing carries over. The waiters exist because the
  *  flow is asynchronous in ways a fixed number of microtask turns cannot
  *  be trusted to cover. */
-function installHostEnv({ useExternalBrowser = false } = {}) {
+function installHostEnv({ useExternalBrowser = false, clientID = "" } = {}) {
   const state = { externalUrls: [], windows: [], removed: [], nextId: 1 };
   const removalListeners = new Set();
   const updateListeners = new Set();
@@ -63,6 +64,7 @@ function installHostEnv({ useExternalBrowser = false } = {}) {
         if ("oauth.useExternalBrowser" in out) {
           out["oauth.useExternalBrowser"] = useExternalBrowser;
         }
+        if ("oauth.clientID" in out) out["oauth.clientID"] = clientID;
         return out;
       },
     },
@@ -347,5 +349,133 @@ test(
     assert.deepEqual(seen, [dialog.id]);
     host.closeWindow(dialog.id);
     await assert.rejects(() => signIn);
+  },
+);
+
+// ── Thunderbird's own OAuth2 (TbOAuth2 experiment) ────────────────────────
+
+/** The TbOAuth2 experiment: records what it was asked, and lets the test
+ *  finish or fail the sign-in the way Thunderbird's OAuth2 would. */
+function installTbOAuth2() {
+  const tb = { calls: [], cancelled: [], finish: null, fail: null };
+  globalThis.browser.TbOAuth2 = {
+    authorize(requestId, details) {
+      tb.calls.push({ requestId, details });
+      return new Promise((resolve, reject) => {
+        tb.finish = (tokens) => resolve(tokens);
+        tb.fail = (message) => reject(new Error(message));
+      });
+    },
+    async cancel(requestId) {
+      tb.cancelled.push(requestId);
+      tb.fail?.("cancelled");
+    },
+  };
+  return tb;
+}
+
+const CUSTOM_ID = "11111111-2222-3333-4444-555555555555";
+/** An unsigned JWT whose payload carries a UPN, like an Exchange token. */
+const jwtFor = (upn) =>
+  `x.${Buffer.from(JSON.stringify({ upn })).toString("base64url")}.y`;
+
+test(
+  "a custom client ID signs in through Thunderbird's own OAuth2",
+  T,
+  async () => {
+    const host = installHostEnv({ useExternalBrowser: true, clientID: CUSTOM_ID });
+    const tb = installTbOAuth2();
+    const exchanges = installTokenEndpoint();
+
+    const signIn = startAuth({ servertype: "office365", loginHint: "a@b.example" });
+    const dialog = await host.windowOpened(1);
+    await new Promise((r) => setTimeout(r, 0));
+
+    assert.equal(
+      new URL(dialog.url, "https://example.invalid/").searchParams.get("mode"),
+      "thunderbird",
+    );
+    const [{ details }] = tb.calls;
+    assert.equal(details.clientId, CUSTOM_ID, "our client ID, not Thunderbird's");
+    assert.equal(details.redirectionEndpoint, "http://localhost");
+    assert.equal(details.loginHint, "a@b.example");
+    assert.deepEqual(host.externalUrls, [], "Thunderbird opens the browser itself");
+
+    tb.finish({
+      accessToken: jwtFor("user@b.example"),
+      refreshToken: "rt-tb",
+      expiresIn: 3600,
+    });
+    const out = await signIn;
+    assert.equal(out.refreshToken, "rt-tb");
+    assert.equal(out.authenticatedUserEmail, "user@b.example");
+    assert.equal(exchanges.length, 0, "the code exchange happened in Thunderbird");
+    assert.ok(host.removed.includes(dialog.id), "the waiting dialog is closed");
+  },
+);
+
+test("closing the waiting dialog cancels Thunderbird's sign-in", T, async () => {
+  const host = installHostEnv({ useExternalBrowser: true, clientID: CUSTOM_ID });
+  const tb = installTbOAuth2();
+  installTokenEndpoint();
+
+  const signIn = startAuth({ servertype: "office365" });
+  const dialog = await host.windowOpened(1);
+  await new Promise((r) => setTimeout(r, 0));
+
+  host.closeWindow(dialog.id);
+  await assert.rejects(signIn, (e) => e.code === ERR.CANCELLED);
+  assert.deepEqual(tb.cancelled, [tb.calls[0].requestId]);
+});
+
+test("a Thunderbird-side timeout ends as cancelled", T, async () => {
+  const host = installHostEnv({ useExternalBrowser: true, clientID: CUSTOM_ID });
+  const tb = installTbOAuth2();
+  installTokenEndpoint();
+
+  const signIn = startAuth({ servertype: "office365" });
+  await host.windowOpened(1);
+  await new Promise((r) => setTimeout(r, 0));
+
+  tb.fail("timeout");
+  await assert.rejects(signIn, (e) => e.code === ERR.CANCELLED);
+});
+
+test("Microsoft's error from Thunderbird's sign-in is an AUTH failure", T, async () => {
+  const host = installHostEnv({ useExternalBrowser: true, clientID: CUSTOM_ID });
+  const tb = installTbOAuth2();
+  installTokenEndpoint();
+
+  const signIn = startAuth({ servertype: "office365" });
+  await host.windowOpened(1);
+  await new Promise((r) => setTimeout(r, 0));
+
+  tb.fail("Microsoft returned: access_denied The user declined");
+  await assert.rejects(signIn, (e) => {
+    assert.equal(e.code, ERR.AUTH);
+    assert.match(e.message, /access_denied/);
+    return true;
+  });
+});
+
+test(
+  "the community client ID keeps the paste route until localhost is registered",
+  T,
+  async () => {
+    const host = installHostEnv({ useExternalBrowser: true });
+    const tb = installTbOAuth2();
+    installTokenEndpoint();
+
+    const { signIn, dialog, token, landedUrl } = await startExternalSignIn(host);
+    assert.equal(
+      new URL(dialog.url, "https://example.invalid/").searchParams.get("mode"),
+      null,
+    );
+    assert.equal(tb.calls.length, 0, "Thunderbird's OAuth2 was not used");
+    assert.equal(
+      (await completeExternalConsent({ token, url: landedUrl })).accepted,
+      true,
+    );
+    assert.equal((await signIn).refreshToken, "rt-1");
   },
 );

@@ -1,0 +1,45 @@
+[
+  {
+    "namespace": "TbOAuth2",
+    "functions": [
+      {
+        "name": "authorize",
+        "type": "function",
+        "async": true,
+        "description": "Runs an interactive OAuth 2.0 authorization-code sign-in through Thunderbird's own OAuth2 module (system browser, loopback redirect, PKCE) and resolves with the tokens.",
+        "parameters": [
+          {
+            "name": "requestId",
+            "type": "string",
+            "description": "Caller-chosen id, used to cancel()."
+          },
+          {
+            "name": "details",
+            "type": "object",
+            "properties": {
+              "clientId": { "type": "string" },
+              "scope": { "type": "string" },
+              "authorizationEndpoint": { "type": "string" },
+              "tokenEndpoint": { "type": "string" },
+              "redirectionEndpoint": { "type": "string" },
+              "loginHint": { "type": "string", "optional": true },
+              "timeoutMs": { "type": "integer" }
+            }
+          }
+        ]
+      },
+      {
+        "name": "cancel",
+        "type": "function",
+        "async": true,
+        "description": "Aborts a pending authorize(); a no-op for an unknown id.",
+        "parameters": [
+          {
+            "name": "requestId",
+            "type": "string"
+          }
+        ]
+      }
+    ]
+  }
+]

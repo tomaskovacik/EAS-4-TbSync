@@ -79,6 +79,22 @@ const CUSTOM_OAUTH_CLIENT_ID_STORAGE_KEY = "oauth.clientID";
  */
 const USE_EXTERNAL_BROWSER_STORAGE_KEY = "oauth.useExternalBrowser";
 
+/**
+ * Whether the community client ID has `http://localhost` registered as a
+ * redirect URI in Entra. Until it does, the external route falls back to
+ * the paste dialog for it; a custom client ID is assumed to have it, since
+ * whoever registered it can add the URI.
+ */
+const DEFAULT_CLIENT_HAS_LOOPBACK_REDIRECT = false;
+
+/** Loopback redirect handed to Thunderbird's OAuth2, which adds the port. */
+const LOOPBACK_REDIRECT_URI = "http://localhost";
+
+/** How long Thunderbird's OAuth2 may wait for the browser. The waiting
+ *  dialog's Cancel is the normal way out; this only ends a sign-in nobody
+ *  is attending to. */
+const TB_OAUTH_TIMEOUT_MS = 15 * 60_000;
+
 /** True iff the user asked for the external-browser route. Storage being
  *  unreachable answers "no": the popup is the route that always works, and
  *  an unreadable option is not a reason to demand a paste. */
@@ -239,7 +255,32 @@ export async function startAuth({ loginHint, servertype, onWindowCreated }) {
   authUrl.searchParams.set("state", state);
   if (loginHint) authUrl.searchParams.set("login_hint", loginHint);
 
-  const responseUrl = (await useExternalBrowser())
+  const external = await useExternalBrowser();
+  if (
+    external &&
+    browser.TbOAuth2 &&
+    (clientID !== DEFAULT_OAUTH_CLIENT_ID || DEFAULT_CLIENT_HAS_LOOPBACK_REDIRECT)
+  ) {
+    // Thunderbird's own OAuth2 does the whole dance - browser, loopback
+    // listener, state, PKCE, code exchange - and returns the tokens.
+    const tokens = await runThunderbirdConsent({
+      clientID,
+      scope,
+      loginHint,
+      onWindowCreated,
+    });
+    if (!tokens.refreshToken) {
+      throw withCode(new Error("No refresh_token in token response"), ERR.AUTH);
+    }
+    return {
+      ...tokens,
+      // No id_token comes back; Exchange access tokens carry the UPN.
+      authenticatedUserEmail:
+        decodeIdTokenEmail(tokens.accessToken) ?? loginHint ?? null,
+    };
+  }
+
+  const responseUrl = external
     ? await runExternalConsent(authUrl.toString(), state, onWindowCreated)
     : await runConsentPopup(authUrl.toString(), onWindowCreated);
 
@@ -650,4 +691,100 @@ export async function cancelExternalConsent({ token } = {}) {
   if (!entry) return { accepted: false, reason: "expired" };
   entry.reject(withCode(new Error("Sign-in cancelled"), ERR.CANCELLED));
   return { accepted: true };
+}
+
+// ── External consent through Thunderbird's own OAuth2 ──────────────────────
+
+/**
+ * Sign in through the TbOAuth2 experiment, which drives Thunderbird's
+ * `OAuth2` (mailnews/base/src/OAuth2.sys.mjs) with this add-on's client ID:
+ * system browser, `http://localhost:<port>` listener, PKCE, code exchange.
+ *
+ * The paste dialog stays up in "thunderbird" mode - no paste box, no
+ * Reopen (the authorization URL is built inside Thunderbird), only a
+ * Cancel - so the user has a way out and the host a window to raise.
+ * Resolves `{ refreshToken, accessToken, expiresIn }`.
+ */
+async function runThunderbirdConsent({ clientID, scope, loginHint, onWindowCreated }) {
+  const token = crypto.randomUUID();
+  const { promise, resolve, reject } = Promise.withResolvers();
+  const entry = {
+    state: null,
+    authUrl: null,
+    redirectUri: null,
+    windowId: null,
+    resolve: null,
+    reject: null,
+  };
+
+  let done = false;
+  const onClosed = (windowId) => {
+    if (windowId !== entry.windowId) return;
+    entry.reject(withCode(new Error("Sign-in cancelled"), ERR.CANCELLED));
+  };
+  const settle = (fn, value) => {
+    if (done) return;
+    done = true;
+    pendingExternal.delete(token);
+    browser.windows.onRemoved.removeListener(onClosed);
+    if (entry.windowId != null) {
+      Promise.resolve(browser.windows.remove(entry.windowId)).catch(() => {});
+    }
+    fn(value);
+  };
+  entry.resolve = (tokens) => settle(resolve, tokens);
+  entry.reject = (err) => {
+    if (done) return;
+    // Harmless when the sign-in already ended on Thunderbird's side.
+    Promise.resolve(browser.TbOAuth2.cancel(token)).catch(() => {});
+    settle(reject, err);
+  };
+  pendingExternal.set(token, entry);
+  browser.windows.onRemoved.addListener(onClosed);
+
+  try {
+    const url = new URL(browser.runtime.getURL(PASTE_DIALOG_PATH));
+    url.searchParams.set("token", token);
+    url.searchParams.set("mode", "thunderbird");
+    const dialog = await browser.windows.create({
+      url: url.toString(),
+      type: "popup",
+      width: 560,
+      height: 300,
+    });
+    entry.windowId = dialog.id;
+    try {
+      onWindowCreated?.(dialog.id);
+    } catch (err) {
+      console.debug("[eas] onWindowCreated callback failed:", err);
+    }
+  } catch (err) {
+    entry.reject(
+      withCode(
+        new Error(`Could not start sign-in: ${err?.message ?? String(err)}`),
+        ERR.AUTH,
+      ),
+    );
+    return promise;
+  }
+
+  browser.TbOAuth2.authorize(token, {
+    clientId: clientID,
+    scope,
+    authorizationEndpoint: AUTH_ENDPOINT,
+    tokenEndpoint: TOKEN_ENDPOINT,
+    redirectionEndpoint: LOOPBACK_REDIRECT_URI,
+    loginHint: loginHint || undefined,
+    timeoutMs: TB_OAUTH_TIMEOUT_MS,
+  }).then(entry.resolve, (err) => {
+    const message = err?.message ?? String(err);
+    entry.reject(
+      withCode(
+        new Error(`Sign-in failed: ${message}`),
+        /^(cancelled|timeout)$/.test(message) ? ERR.CANCELLED : ERR.AUTH,
+      ),
+    );
+  });
+
+  return promise;
 }

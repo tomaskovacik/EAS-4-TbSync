@@ -19,7 +19,11 @@ import { localizeDocument } from "../../vendor/i18n/i18n.mjs";
 const $ = (id) => document.getElementById(id);
 const i18n = (key, fallback) => browser.i18n.getMessage(key) || fallback;
 
-const token = new URLSearchParams(location.search).get("token");
+const params = new URLSearchParams(location.search);
+const token = params.get("token");
+/** "thunderbird": Thunderbird's own OAuth2 catches the redirect, so there
+ *  is nothing to paste and no URL to reopen; the window only offers Cancel. */
+const waitingOnly = params.get("mode") === "thunderbird";
 
 /** One sentence per way the paste can be wrong. `expired` is the odd one:
  *  the sign-in is gone, so there is nothing to try again and the window is
@@ -142,6 +146,13 @@ document.addEventListener("DOMContentLoaded", () => {
     return;
   }
 
+  if (waitingOnly) {
+    for (const id of ["intro", "steps", "paste-field", "btn-continue", "btn-reopen"]) {
+      $(id).hidden = true;
+    }
+    $("waiting").hidden = false;
+  }
+
   $("btn-continue").addEventListener("click", submit);
   $("btn-reopen").addEventListener("click", reopen);
   // Cancel tells the background, which closes this window: a content page
@@ -161,5 +172,5 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  $("redirect-url").focus();
+  if (!waitingOnly) $("redirect-url").focus();
 });
