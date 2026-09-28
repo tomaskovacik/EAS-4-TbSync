@@ -133,6 +133,22 @@ var OAuthLoopback = class extends ExtensionCommon.ExtensionAPI {
               connection.close();
             },
             onInputStreamReady(stream) {
+              // Never leave the browser hanging: whatever goes wrong while
+              // handling the request, it gets an answer.
+              try {
+                connection.handle(stream);
+              } catch (e) {
+                console.error("OAuth loopback request failed:", e);
+                connection.respond(
+                  "500 Internal Server Error",
+                  page(
+                    "oauthLoopback.page.failed",
+                    "Sign-in did not succeed. You can close this tab and return to Thunderbird.",
+                  ),
+                );
+              }
+            },
+            handle(stream) {
               if (closed) {
                 connection.close();
                 return;
@@ -168,7 +184,8 @@ var OAuthLoopback = class extends ExtensionCommon.ExtensionAPI {
                 return;
               }
               const url = `http://localhost:${port}${match[1]}`;
-              const failed = new URL(url).searchParams.has("error");
+              // No `URL` here: the ext-*.js sandbox only exposes ChromeUtils.
+              const failed = /[?&]error=/.test(match[1]);
               connection.respond(
                 "200 OK",
                 failed
