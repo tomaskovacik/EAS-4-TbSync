@@ -7,6 +7,7 @@ import {
 } from "./modules/eas/oauth.mjs";
 import { discoverEasServer } from "./modules/eas/autodiscover.mjs";
 import { installAnchorMailboxInjector } from "./modules/anchor-mailbox.mjs";
+import { installTokenOriginStripper } from "./modules/token-origin.mjs";
 import {
   registerCalendarProvider,
   setSyncHandlers,
@@ -29,6 +30,7 @@ import {
 // constructs and starts issuing requests, so the very first OPTIONS /
 // FolderSync of the boot is already cookie-injected.
 installAnchorMailboxInjector();
+installTokenOriginStripper();
 
 // Claim our calendar type before anything can ask for one. Calendars of a
 // type nobody has registered come up as force-disabled placeholders, so the
