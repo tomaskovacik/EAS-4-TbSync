@@ -32,14 +32,15 @@ var { ExtensionError } = ExtensionUtils;
 function describe(reason) {
   const text = String(reason?.message ?? reason ?? "unknown error");
   if (/^https?:\/\//.test(text)) {
-    try {
-      const url = new URL(text);
-      const error = url.searchParams.get("error");
-      if (error) {
-        const desc = url.searchParams.get("error_description") ?? "";
-        return `Microsoft returned: ${error} ${desc}`.trim();
-      }
-    } catch {}
+    // No `URL` here: the ext-*.js sandbox only exposes ChromeUtils.
+    const param = (name) => {
+      const m = new RegExp(`[?&]${name}=([^&#]*)`).exec(text);
+      return m ? decodeURIComponent(m[1].replace(/\+/g, " ")) : null;
+    };
+    const error = param("error");
+    if (error) {
+      return `Microsoft returned: ${error} ${param("error_description") ?? ""}`.trim();
+    }
     return "authorization failed";
   }
   try {
